@@ -1,22 +1,25 @@
 import OpenAI from "openai";
 import dotenv from "dotenv";
+import { transferConversationCallSchema } from "./openAiSchema.js";
+import { transferCall } from "./handoff.js";
 
 dotenv.config();
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+let fullResponse = "";
+
 export async function aiResponseStream(messages, ws) {
-  const stream = await openai.chat.completions.create({
+  const stream = await openai.responses.create({
     model: "gpt-4o-mini",
-    messages: messages,
+    input: messages,
     stream: true,
+    tools: [transferConversationCallSchema],
   });
-
-  let fullResponse = "";
-
-  for await (const chunk of stream) {
-    const content = chunk.choices[0]?.delta?.content || "";
-    if (content) {
+  for await (const event of stream) {
+    console.log("Event:", event);
+    if (event.type === "response.output_text.delta") {
+      const content = event.delta;
       fullResponse += content;
       ws.send(
         JSON.stringify({
@@ -25,9 +28,25 @@ export async function aiResponseStream(messages, ws) {
           last: false,
         })
       );
-      console.log("Sent chunk:", content);
+      process.stdout.write(event.delta); // prints tokens as they stream
+    }
+    if (event.item && event.item.type === "function_call") {
+      // OpenAI wants to trigger transfer
+      console.log("OpenAI triggered transfer!");
+
+      //Call your Twilio transfer using your own parameters
+      await transferCall(ws);
+
+      ws.send(
+        JSON.stringify({
+          type: "end",
+          handoffData:
+            '{"reasonCode":"live-agent-handoff", "reason": "The caller wants to talk to a real person"}',
+        })
+      );
+    } else if (event.type === "response.completed") {
+      console.log("\n--- done ---");
     }
   }
-  console.log("Full response", fullResponse);
   return fullResponse;
 }
